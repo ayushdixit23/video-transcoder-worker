@@ -6,9 +6,12 @@ import fs from 'fs';
 import path from 'path';
 import { promisify } from 'util';
 import { Upload } from "@aws-sdk/lib-storage";
+import AnimeVideo from './models/videos.mongo.js';
+import mongoose from 'mongoose';
+import { MONGO_URI } from './helpers/envConfig.js';
 
 const CONCURRENT_JOBS = 1;
-const TEMP_DIR = '/tmp/video_transcoder'; // Change to your temp storage location
+const TEMP_DIR = '/tmp/video_transcoder';
 
 const mkdir = promisify(fs.mkdir);
 const readdir = promisify(fs.readdir);
@@ -24,6 +27,12 @@ async function ensureDirectoryExists(dirPath: string) {
             throw error;
         }
     }
+}
+
+let isMongoConnected = false;
+
+function updateFilePath(filePath: string) {
+    return filePath.replace(/\.mp4$/, '/index.m3u8');
 }
 
 async function consumeMessages(): Promise<void> {
@@ -44,8 +53,8 @@ const handleMessage = (channel: amqp.Channel) => async (msg: amqp.Message | null
         return;
     }
 
-    const message = JSON.parse(msg.content.toString()) as { bucket: string; filename: string };
-    const { bucket, filename } = message;
+    const message = JSON.parse(msg.content.toString()) as { bucket: string; filename: string, animeVideoId: string };
+    const { bucket, filename, animeVideoId } = message;
 
     // Extract folder name from filename
     const folderName = path.dirname(filename);
@@ -62,6 +71,10 @@ const handleMessage = (channel: amqp.Channel) => async (msg: amqp.Message | null
 
         await deleteOriginalVideoFromS3(bucket, filename);
 
+        console.log(`Updating video URL in DB for: ${filename}`);
+        await updateVideoUrl(animeVideoId, filename);
+
+
         channel.ack(msg);
     } catch (err: any) {
         console.error(`Failed to process message: ${err.message}`);
@@ -69,6 +82,33 @@ const handleMessage = (channel: amqp.Channel) => async (msg: amqp.Message | null
         channel.ack(msg);
     }
 };
+
+
+
+// Initialize MongoDB connection
+async function initMongoConnection() {
+    if (!isMongoConnected) {
+        try {
+            await mongoose.connect(MONGO_URI);
+            isMongoConnected = true;
+            console.log('Connected to MongoDB');
+        } catch (error) {
+            console.error('MongoDB connection error:', error);
+            process.exit(1); // Exit if MongoDB connection fails
+        }
+    }
+}
+
+async function updateVideoUrl(animeVideoId: string, filename: string) {
+    try {
+        await initMongoConnection();
+        const updatedUrl = updateFilePath(filename);
+        await AnimeVideo.findByIdAndUpdate(animeVideoId, { url: updatedUrl });
+        console.log(`Updated DB entry: ${animeVideoId} -> ${updatedUrl}`);
+    } catch (error) {
+        console.error('Error updating video URL in DB:', error);
+    }
+}
 
 async function deleteOriginalVideoFromS3(bucket: string, filename: string): Promise<void> {
     console.log(`Deleting ${filename} from S3...`);
